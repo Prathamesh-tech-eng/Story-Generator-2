@@ -7,7 +7,14 @@ from typing import List
 import streamlit as st
 from dotenv import load_dotenv
 
-from story_generator import GeminiClient, StoryConfig, build_prompt
+from story_generator import (
+    GeminiClient,
+    StoryConfig,
+    generate_story_in_chapters,
+    generate_story_single_shot,
+    should_chunk_story,
+    translate_story_in_chunks,
+)
 
 load_dotenv()
 
@@ -172,6 +179,10 @@ def main() -> None:
             col7, col8 = st.columns([2, 1])
             model = col7.selectbox("Gemini model", GEMINI_MODELS, index=0)
             temperature = col8.slider("Temperature", min_value=0.2, max_value=1.2, value=0.75, step=0.05)
+            chunked_generation = st.checkbox(
+                "Chunk story chapter-by-chapter (recommended when word count is high)",
+                value=True,
+            )
 
             submitted = st.form_submit_button("Generate story")
 
@@ -196,11 +207,20 @@ def main() -> None:
                 except ValueError as exc:
                     st.error(str(exc))
                 else:
-                    prompt = build_prompt(cfg)
                     try:
                         with st.spinner("Calling Gemini…"):
                             client = _make_client(model)
-                            story = client.generate_story(prompt, temperature)
+                            chunked = chunked_generation or should_chunk_story(cfg)
+                            try:
+                                if chunked:
+                                    story = generate_story_in_chapters(client, cfg, temperature)
+                                else:
+                                    story = generate_story_single_shot(client, cfg, temperature)
+                            except Exception as exc_inner:
+                                if (not chunked) and "MAX_TOKENS" in str(exc_inner):
+                                    story = generate_story_in_chapters(client, cfg, temperature)
+                                else:
+                                    raise
                     except Exception as exc:  # noqa: BLE001
                         st.error(f"Failed to generate story: {exc}")
                     else:
@@ -228,6 +248,9 @@ def main() -> None:
             "Temperature", min_value=0.2, max_value=0.8, value=0.35, step=0.05
         )
         translation_model = translation_col2.selectbox("Gemini model", GEMINI_MODELS, index=0, key="translation_model")
+        translation_chunk_chars = translation_col2.number_input(
+            "Chunk size (characters)", min_value=600, max_value=2800, value=1800, step=200
+        )
 
         if st.button("Translate story"):
             if not source_text.strip():
@@ -236,10 +259,12 @@ def main() -> None:
                 try:
                     with st.spinner("Translating via Gemini…"):
                         client = _make_client(translation_model)
-                        translation = client.translate_text(
+                        translation = translate_story_in_chunks(
+                            client,
                             source_text,
                             target_language=target_language,
                             temperature=translation_temperature,
+                            max_chars=int(translation_chunk_chars),
                         )
                 except Exception as exc:  # noqa: BLE001
                     st.error(f"Failed to translate story: {exc}")

@@ -8,7 +8,14 @@ from tkinter import messagebox, ttk
 
 from dotenv import load_dotenv
 
-from story_generator import GeminiClient, StoryConfig, build_prompt
+from story_generator import (
+    GeminiClient,
+    StoryConfig,
+    generate_story_in_chapters,
+    generate_story_single_shot,
+    should_chunk_story,
+    translate_story_in_chunks,
+)
 
 load_dotenv()
 
@@ -99,6 +106,7 @@ class StoryApp:
         self.ending_var = tk.StringVar(value=ENDING_OPTIONS[0])
         self.model_var = tk.StringVar(value=MODEL_OPTIONS[-1])
         self.temperature_var = tk.DoubleVar(value=0.75)
+        self.chunked_var = tk.BooleanVar(value=True)
 
         self._build_layout()
 
@@ -172,6 +180,11 @@ class StoryApp:
         ttk.Label(model_frame, text="Temperature").grid(row=0, column=1, padx=(16, 4))
         temperature_scale = ttk.Scale(model_frame, from_=0.2, to=1.2, orient=tk.HORIZONTAL, variable=self.temperature_var)
         temperature_scale.grid(row=0, column=2, sticky=tk.EW)
+        ttk.Checkbutton(
+            model_frame,
+            text="Chunk chapter-by-chapter (avoids long generations)",
+            variable=self.chunked_var,
+        ).grid(row=1, column=0, columnspan=3, sticky=tk.W, pady=(8, 0))
 
         button_frame = ttk.Frame(root_frame)
         button_frame.pack(fill=tk.X, pady=(12, 0))
@@ -254,21 +267,38 @@ class StoryApp:
         return cfg
 
     def _generate_story_async(self, config: StoryConfig) -> None:
+        api_key = os.getenv("GEMINI_API_KEY")
+        client = GeminiClient(api_key=api_key, model=self.model_var.get())
+        force_chunked = self.chunked_var.get()
+        chunked = force_chunked or should_chunk_story(config)
         try:
-            prompt = build_prompt(config)
-            api_key = os.getenv("GEMINI_API_KEY")
-            client = GeminiClient(api_key=api_key, model=self.model_var.get())
-            story = client.generate_story(prompt=prompt, temperature=self.temperature_var.get())
+            if chunked:
+                story = generate_story_in_chapters(client, config, self.temperature_var.get())
+            else:
+                story = generate_story_single_shot(client, config, self.temperature_var.get())
         except Exception as exc:  # noqa: BLE001 - want clear UI feedback
-            self.root.after(0, self._handle_error, exc, "Generation failed.")
-            return
+            if (not chunked) and "MAX_TOKENS" in str(exc):
+                try:
+                    story = generate_story_in_chapters(client, config, self.temperature_var.get())
+                except Exception as chunk_exc:  # noqa: BLE001
+                    self.root.after(0, self._handle_error, chunk_exc, "Generation failed even after chunking.")
+                    return
+            else:
+                self.root.after(0, self._handle_error, exc, "Generation failed.")
+                return
         self.root.after(0, self._handle_success, story)
 
     def _translate_story_async(self, story_text: str) -> None:
         try:
             api_key = os.getenv("GEMINI_API_KEY")
             client = GeminiClient(api_key=api_key, model=self.model_var.get())
-            translation = client.translate_text(story_text, target_language="Marathi", temperature=0.35)
+            translation = translate_story_in_chunks(
+                client,
+                story_text,
+                target_language="Marathi",
+                temperature=0.35,
+                max_chars=1800,
+            )
         except Exception as exc:  # noqa: BLE001 - want clear UI feedback
             self.root.after(0, self._handle_error, exc, "Translation failed.")
             return

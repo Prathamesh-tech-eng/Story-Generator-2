@@ -150,25 +150,83 @@ def build_prompt(cfg: StoryConfig) -> str:
     return textwrap.dedent(template).strip()
 
 
-def build_translation_prompt(story_text: str, target_language: str = "Marathi") -> str:
+def build_chapter_prompt(
+    cfg: StoryConfig,
+    chapter_number: int,
+    prior_text: str,
+    target_words: int,
+) -> str:
+    """Prompt for a single chapter to keep outputs within token limits."""
+
+    prior_context = prior_text.strip() or "No chapters have been written yet."
+    prior_context = prior_context[-2000:]
+
+    character_lines = "\n".join(f"- {c}" for c in cfg.characters) or "- Introduce 1-3 fitting characters but keep them stable once named."
+    twist_lines = "\n".join(f"- {t}" for t in cfg.plot_twists) or "- Subtle reveal tied to family legacy"
+
+    template = f"""
+    You are an accomplished English-language storyteller steeped in Maharashtrian culture.
+    Write Chapter {chapter_number} of {cfg.chapters} for the following story brief while preserving
+    tonal and factual consistency with earlier chapters.
+
+    Story brief:
+    - Core description: {cfg.story_description}
+    - Characters to keep consistent:
+    {character_lines}
+    - Genre: {cfg.genre}
+    - Writing style: {cfg.writing_style}
+    - Literary inspiration: {cfg.literature_inspiration}
+    - Desired plot twists:
+    {twist_lines}
+    - Ending mood/type: {cfg.ending_type}
+
+    Previously written chapters (keep continuity, do not repeat):
+    <context>
+    {prior_context}
+    </context>
+
+    Requirements for this chapter:
+    1. Target about {target_words} words (±15%).
+    2. Output must start with 'Chapter {chapter_number}: <title>'.
+    3. Advance the narrative meaningfully with Maharashtrian settings, idioms, and customs.
+    4. Do not introduce new main characters in the final chapter.
+    5. Maintain consistent motivations, relationships, and unresolved threads from earlier chapters.
+    6. Focus only on Chapter {chapter_number}; do not summarise past chapters or foreshadow future ones explicitly.
+    """
+    return textwrap.dedent(template).strip()
+
+
+def build_translation_prompt(
+    story_text: str,
+    target_language: str = "Marathi",
+    chunk_index: int | None = None,
+    chunk_count: int | None = None,
+) -> str:
     """Create a constrained prompt that only asks for literal translation."""
 
     sanitized = story_text.strip()
     if not sanitized:
         raise ValueError("No story text supplied for translation.")
 
+    chunk_note = ""
+    if chunk_index is not None and chunk_count is not None:
+        chunk_note = (
+            f"This text is chunk {chunk_index} of {chunk_count}. Preserve continuity with prior chunks but do not repeat or summarize previous content. "
+            "Do not add opening or closing remarks—just translate this chunk exactly."
+        )
+
     template = f"""
-    You are an expert literary translator. Translate the provided story into {target_language}
-    while preserving realism, tone, pacing, and structure. Do not summarize, omit, or embellish
-    any details. Keep chapter headings, paragraph breaks, and character names aligned with their
-    roles, translating them only when culturally appropriate for {target_language} readers.
+    You are an expert literary translator. Translate the provided story chunk into {target_language}
+    while preserving realism, tone, pacing, and structure. {chunk_note}
+    Do not summarize, omit, or embellish any details. Keep chapter headings, paragraph breaks, and character
+    names aligned with their roles, translating them only when culturally appropriate for {target_language} readers.
 
     Output rules:
     1. Return only the translated story text, no commentary, code fences, or explanations.
     2. Mirror the original formatting exactly (chapter headings, blank lines, italics markers, etc.).
     3. Maintain emotional intensity and descriptive richness without introducing new ideas.
 
-    Story to translate:
+    Story chunk to translate:
     <story>
     {sanitized}
     </story>
@@ -217,8 +275,15 @@ class GeminiClient:
         source_text: str,
         target_language: str = "Marathi",
         temperature: float = 0.35,
+        chunk_index: int | None = None,
+        chunk_count: int | None = None,
     ) -> str:
-        translation_prompt = build_translation_prompt(source_text, target_language)
+        translation_prompt = build_translation_prompt(
+            source_text,
+            target_language,
+            chunk_index=chunk_index,
+            chunk_count=chunk_count,
+        )
         return self._call_gemini(translation_prompt, temperature)
 
 
@@ -230,6 +295,97 @@ def load_config(path: str | None) -> StoryConfig:
     cfg = StoryConfig.from_dict(data)
     cfg.validate()
     return cfg
+
+
+def _split_story_into_chunks(text: str, max_chars: int = 1800) -> List[str]:
+    sanitized = text.strip()
+    if not sanitized:
+        return []
+
+    chunks: List[str] = []
+    start = 0
+    length = len(sanitized)
+
+    while start < length:
+        end = min(length, start + max_chars)
+        if end < length:
+            split = sanitized.rfind("\n\n", start, end)
+            if split == -1 or split <= start:
+                split = sanitized.rfind("\n", start, end)
+            if split == -1 or split <= start:
+                split = end
+        else:
+            split = length
+
+        chunk = sanitized[start:split].strip()
+        if chunk:
+            chunks.append(chunk)
+
+        start = split
+        while start < length and sanitized[start].isspace():
+            start += 1
+
+    return chunks
+
+
+def translate_story_in_chunks(
+    client: GeminiClient,
+    story_text: str,
+    target_language: str = "Marathi",
+    temperature: float = 0.35,
+    max_chars: int = 1800,
+) -> str:
+    chunks = _split_story_into_chunks(story_text, max_chars=max_chars)
+    if not chunks:
+        raise ValueError("No story text supplied for translation.")
+
+    translated_chunks: List[str] = []
+    total = len(chunks)
+    for idx, chunk in enumerate(chunks, start=1):
+        translated = client.translate_text(
+            chunk,
+            target_language=target_language,
+            temperature=temperature,
+            chunk_index=idx,
+            chunk_count=total,
+        )
+        translated_chunks.append(translated)
+
+    return "\n\n".join(translated_chunks)
+
+
+def generate_story_in_chapters(
+    client: GeminiClient,
+    cfg: StoryConfig,
+    temperature: float,
+) -> str:
+    chapters: List[str] = []
+    cumulative_text = ""
+    target_words = max(200, cfg.word_length // max(1, cfg.chapters))
+    for chapter_number in range(1, cfg.chapters + 1):
+        prompt = build_chapter_prompt(
+            cfg,
+            chapter_number=chapter_number,
+            prior_text=cumulative_text,
+            target_words=target_words,
+        )
+        chapter_text = client.generate_story(prompt, temperature)
+        chapters.append(chapter_text.strip())
+        cumulative_text = "\n\n".join(chapters)
+    return "\n\n".join(chapters)
+
+
+def generate_story_single_shot(
+    client: GeminiClient,
+    cfg: StoryConfig,
+    temperature: float,
+) -> str:
+    prompt = build_prompt(cfg)
+    return client.generate_story(prompt, temperature)
+
+
+def should_chunk_story(cfg: StoryConfig) -> bool:
+    return cfg.word_length >= 1400 or cfg.chapters >= 4
 
 
 def parse_args() -> argparse.Namespace:
@@ -247,6 +403,18 @@ def parse_args() -> argparse.Namespace:
         "--translate-language",
         default="Marathi",
         help="Target language when using --translate-file (default: Marathi)",
+    )
+    parser.add_argument(
+        "--translate-chunk-chars",
+        type=int,
+        default=1800,
+        help="Approximate maximum characters per translation chunk (default: 1800)",
+    )
+    parser.add_argument(
+        "--chapter-mode",
+        choices=["auto", "single", "chunked"],
+        default="auto",
+        help="Control whether the story is generated in one go or per chapter",
     )
     return parser.parse_args()
 
@@ -274,10 +442,12 @@ def main() -> None:
             sys.exit(1)
 
         try:
-            translation = client.translate_text(
+            translation = translate_story_in_chunks(
+                client,
                 source_text,
                 target_language=args.translate_language,
                 temperature=args.temperature,
+                max_chars=max(600, args.translate_chunk_chars),
             )
         except Exception as err:  # noqa: BLE001 - surface full context to user
             print(f"Failed to translate story: {err}", file=sys.stderr)
@@ -295,17 +465,35 @@ def main() -> None:
         print(f"Error loading config: {err}", file=sys.stderr)
         sys.exit(1)
 
-    prompt = build_prompt(cfg)
+    single_prompt = build_prompt(cfg)
 
     if args.dry_run:
-        print(prompt)
+        print(single_prompt)
         return
 
+    chunked = False
+    if args.chapter_mode == "chunked":
+        chunked = True
+    elif args.chapter_mode == "single":
+        chunked = False
+    else:
+        chunked = should_chunk_story(cfg)
+
     try:
-        story = client.generate_story(prompt, args.temperature)
+        if chunked:
+            story = generate_story_in_chapters(client, cfg, args.temperature)
+        else:
+            story = generate_story_single_shot(client, cfg, args.temperature)
     except Exception as err:  # noqa: BLE001 - surface full context to user
-        print(f"Failed to generate story: {err}", file=sys.stderr)
-        sys.exit(1)
+        if (not chunked) and "MAX_TOKENS" in str(err):
+            try:
+                story = generate_story_in_chapters(client, cfg, args.temperature)
+            except Exception as chunk_err:  # noqa: BLE001
+                print(f"Failed to generate story even after chunking: {chunk_err}", file=sys.stderr)
+                sys.exit(1)
+        else:
+            print(f"Failed to generate story: {err}", file=sys.stderr)
+            sys.exit(1)
 
     if args.output:
         with open(args.output, "w", encoding="utf-8") as handle:

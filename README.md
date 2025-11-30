@@ -48,6 +48,7 @@ Structure of the JSON file:
   "ending_type": "Resolute yet hopeful"
 }
 ```
+  Use `--chapter-mode chunked` to force chapter-by-chapter generation (useful for very long stories), `--chapter-mode single` to insist on a single response, or leave the default `auto` to let the tool choose based on word length/chapter count.
 
 ### GUI mode
 
@@ -70,6 +71,7 @@ streamlit run streamlit_app.py
 ```
 
 The "Generate Story" tab mirrors the CLI inputs with dropdowns, multi-select twists, and Gemini model/temperature controls. The "Translate Story" tab lets you paste any prose (or re-use the latest generated output) and obtain an on-brand Marathi/Hindi/Sanskrit/English rendition that preserves realism. Add your `GEMINI_API_KEY` to the environment before deploying to Streamlit Cloud or any hosting provider.
+Translation chunks default to roughly 1,800 characters; adjust the numeric input on the Translate tab if Gemini still reports `MAX_TOKENS`.
 
 ### Translate an existing story (CLI)
 
@@ -80,6 +82,7 @@ python story_generator.py --translate-file outputs\festival_story.txt --translat
 ```
 
 The script builds a translation-only prompt that forbids summaries or commentary and prints the translated story text (and optionally saves it via `--output`).
+If Gemini returns `MAX_TOKENS`, rerun with a smaller chunk size via `--translate-chunk-chars 1400` (minimum 600).
 
 ### Prompt inspection
 
@@ -95,3 +98,4 @@ python story_generator.py --config request.json --dry-run
 - Translation mode sends a strict instruction set so Gemini returns only the converted prose—no headers, comments, or extra narration.
 - Adjust `--temperature` or `--model` if you need a calmer or more exploratory narrative.
 - Stories are streamed back to stdout and optionally written to the file specified by `--output`.
+- Use `--chapter-mode chunked` (CLI) or the “Chunk chapter-by-chapter” toggles (Tkinter/Streamlit) to force sequential chapter generation, which avoids Gemini’s max-token errors on large outputs. In `auto` mode (default), chunking kicks in automatically for long or multi-chapter requests, and the app will fall back to chunked output if Gemini reports `MAX_TOKENS`.
