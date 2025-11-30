@@ -8,7 +8,11 @@ import streamlit as st
 from dotenv import load_dotenv
 
 from story_generator import (
+    GeminiAPIError,
     GeminiClient,
+    GeminiContentError,
+    GeminiMaxTokensError,
+    GeminiRateLimitError,
     StoryConfig,
     generate_story_in_chapters,
     generate_story_single_shot,
@@ -138,6 +142,18 @@ def _get_latest_story() -> str:
     return st.session_state.get("latest_story", "")
 
 
+def _friendly_error_message(exc: Exception) -> str:
+    if isinstance(exc, GeminiContentError):
+        return "Gemini blocked the request because the content tripped safety filters. Please soften the text."
+    if isinstance(exc, GeminiRateLimitError):
+        return "Gemini rate limit reached. Wait a few seconds or lower the request frequency."
+    if isinstance(exc, GeminiMaxTokensError):
+        return "Gemini hit its token ceiling. Reduce target length or enable chapter chunking."
+    if isinstance(exc, GeminiAPIError):
+        return str(exc)
+    return str(exc)
+
+
 def main() -> None:
     st.set_page_config(page_title="Maharashtrian Story Studio", layout="wide")
     st.title("Maharashtrian Story Studio")
@@ -216,13 +232,12 @@ def main() -> None:
                                     story = generate_story_in_chapters(client, cfg, temperature)
                                 else:
                                     story = generate_story_single_shot(client, cfg, temperature)
-                            except Exception as exc_inner:
-                                if (not chunked) and "MAX_TOKENS" in str(exc_inner):
-                                    story = generate_story_in_chapters(client, cfg, temperature)
-                                else:
+                            except GeminiMaxTokensError:
+                                if chunked:
                                     raise
-                    except Exception as exc:  # noqa: BLE001
-                        st.error(f"Failed to generate story: {exc}")
+                                story = generate_story_in_chapters(client, cfg, temperature)
+                    except (GeminiContentError, GeminiRateLimitError, GeminiMaxTokensError, GeminiAPIError) as exc:
+                        st.error(_friendly_error_message(exc))
                     else:
                         st.success("Story ready!")
                         st.text_area("Generated story", value=story, height=400, key="story_output")
@@ -266,8 +281,8 @@ def main() -> None:
                             temperature=translation_temperature,
                             max_chars=int(translation_chunk_chars),
                         )
-                except Exception as exc:  # noqa: BLE001
-                    st.error(f"Failed to translate story: {exc}")
+                except (GeminiContentError, GeminiRateLimitError, GeminiMaxTokensError, GeminiAPIError) as exc:
+                    st.error(_friendly_error_message(exc))
                 else:
                     st.success(f"Translation ready in {target_language}!")
                     st.text_area("Translated story", value=translation, height=360, key="translation_output")

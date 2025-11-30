@@ -14,6 +14,26 @@ import requests
 from dotenv import load_dotenv
 
 
+class GeminiError(RuntimeError):
+    """Base exception for Gemini-related issues."""
+
+
+class GeminiAPIError(GeminiError):
+    """Generic API or network failure."""
+
+
+class GeminiRateLimitError(GeminiError):
+    """Raised when Gemini reports too many requests."""
+
+
+class GeminiMaxTokensError(GeminiError):
+    """Raised when Gemini stops early due to token limits."""
+
+
+class GeminiContentError(GeminiError):
+    """Raised when Gemini blocks output due to safety filters."""
+
+
 @dataclass
 class StoryConfig:
     """Container for the user-controlled knobs."""
@@ -253,19 +273,54 @@ class GeminiClient:
                 "maxOutputTokens": 4096,
             },
         }
-        response = requests.post(
-            self.endpoint,
-            params={"key": self.api_key},
-            headers={"Content-Type": "application/json"},
-            json=payload,
-            timeout=120,
-        )
-        response.raise_for_status()
-        data = response.json()
         try:
-            return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+            response = requests.post(
+                self.endpoint,
+                params={"key": self.api_key},
+                headers={"Content-Type": "application/json"},
+                json=payload,
+                timeout=120,
+            )
+            response.raise_for_status()
+        except requests.exceptions.HTTPError as exc:
+            status = exc.response.status_code if exc.response else "unknown"
+            if status == 429:
+                raise GeminiRateLimitError("Gemini API rate limit reached. Please wait and retry.") from exc
+            raise GeminiAPIError(f"Gemini HTTP error ({status}): {exc}") from exc
+        except requests.exceptions.RequestException as exc:
+            raise GeminiAPIError(f"Network error calling Gemini: {exc}") from exc
+
+        try:
+            data = response.json()
+        except ValueError as exc:  # JSON decode error
+            raise GeminiAPIError("Gemini returned malformed JSON.") from exc
+
+        candidates = data.get("candidates", [])
+        if not candidates:
+            prompt_feedback = data.get("promptFeedback", {})
+            block_reason = prompt_feedback.get("blockReason")
+            if block_reason in {"SAFETY", "BLOCKLIST", "PROHIBITED_CONTENT"}:
+                raise GeminiContentError("Gemini blocked the request due to content safety.")
+            raise GeminiAPIError(f"Unexpected Gemini response: {json.dumps(data, indent=2)}")
+
+        candidate = candidates[0]
+        finish_reason = candidate.get("finishReason")
+        try:
+            text = candidate["content"]["parts"][0]["text"].strip()
         except (KeyError, IndexError, TypeError) as exc:
-            raise RuntimeError(f"Unexpected Gemini response: {json.dumps(data, indent=2)}") from exc
+            raise GeminiAPIError(f"Unexpected Gemini response: {json.dumps(data, indent=2)}") from exc
+
+        if finish_reason and finish_reason != "STOP":
+            if finish_reason == "MAX_TOKENS":
+                raise GeminiMaxTokensError("Gemini stopped early because it hit the token limit.")
+            if finish_reason in {"SAFETY", "BLOCKLIST", "PROHIBITED_CONTENT"}:
+                raise GeminiContentError("Gemini blocked the response due to content safety.")
+            raise GeminiAPIError(f"Gemini ended the response with reason: {finish_reason}")
+
+        if not text:
+            raise GeminiAPIError("Gemini returned an empty response.")
+
+        return text
 
     def generate_story(self, prompt: str, temperature: float) -> str:
         return self._call_gemini(prompt, temperature)
@@ -342,14 +397,25 @@ def translate_story_in_chunks(
     translated_chunks: List[str] = []
     total = len(chunks)
     for idx, chunk in enumerate(chunks, start=1):
-        translated = client.translate_text(
-            chunk,
-            target_language=target_language,
-            temperature=temperature,
-            chunk_index=idx,
-            chunk_count=total,
-        )
-        translated_chunks.append(translated)
+        try:
+            translated = client.translate_text(
+                chunk,
+                target_language=target_language,
+                temperature=temperature,
+                chunk_index=idx,
+                chunk_count=total,
+            )
+        except GeminiMaxTokensError:
+            if max_chars <= 600:
+                raise
+            translated = translate_story_in_chunks(
+                client,
+                chunk,
+                target_language=target_language,
+                temperature=temperature,
+                max_chars=max(600, max_chars // 2),
+            )
+        translated_chunks.append(translated.strip())
 
     return "\n\n".join(translated_chunks)
 
@@ -449,7 +515,24 @@ def main() -> None:
                 temperature=args.temperature,
                 max_chars=max(600, args.translate_chunk_chars),
             )
-        except Exception as err:  # noqa: BLE001 - surface full context to user
+        except GeminiContentError as err:
+            print(
+                "Gemini blocked the translation due to content safety policies. Consider softening the text.",
+                file=sys.stderr,
+            )
+            print(err, file=sys.stderr)
+            sys.exit(2)
+        except GeminiRateLimitError as err:
+            print(f"{err} Retry after a short pause.", file=sys.stderr)
+            sys.exit(3)
+        except GeminiMaxTokensError as err:
+            print(
+                "Gemini still hit the token ceiling while translating. Try reducing --translate-chunk-chars further.",
+                file=sys.stderr,
+            )
+            print(err, file=sys.stderr)
+            sys.exit(4)
+        except GeminiAPIError as err:
             print(f"Failed to translate story: {err}", file=sys.stderr)
             sys.exit(1)
 
@@ -484,16 +567,31 @@ def main() -> None:
             story = generate_story_in_chapters(client, cfg, args.temperature)
         else:
             story = generate_story_single_shot(client, cfg, args.temperature)
-    except Exception as err:  # noqa: BLE001 - surface full context to user
-        if (not chunked) and "MAX_TOKENS" in str(err):
-            try:
-                story = generate_story_in_chapters(client, cfg, args.temperature)
-            except Exception as chunk_err:  # noqa: BLE001
-                print(f"Failed to generate story even after chunking: {chunk_err}", file=sys.stderr)
-                sys.exit(1)
-        else:
-            print(f"Failed to generate story: {err}", file=sys.stderr)
-            sys.exit(1)
+    except GeminiMaxTokensError:
+        if chunked:
+            print(
+                "Gemini hit the token limit even when generating chapter-by-chapter. Try lowering word length or chapter count.",
+                file=sys.stderr,
+            )
+            sys.exit(4)
+        try:
+            story = generate_story_in_chapters(client, cfg, args.temperature)
+        except GeminiError as chunk_err:
+            print(f"Failed to generate story even after chunking: {chunk_err}", file=sys.stderr)
+            sys.exit(4)
+    except GeminiContentError as err:
+        print(
+            "Gemini blocked the story because the prompt/output violated safety policies. Try softening twists or themes.",
+            file=sys.stderr,
+        )
+        print(err, file=sys.stderr)
+        sys.exit(2)
+    except GeminiRateLimitError as err:
+        print(f"{err} Retry after a short pause.", file=sys.stderr)
+        sys.exit(3)
+    except GeminiAPIError as err:
+        print(f"Failed to generate story: {err}", file=sys.stderr)
+        sys.exit(1)
 
     if args.output:
         with open(args.output, "w", encoding="utf-8") as handle:

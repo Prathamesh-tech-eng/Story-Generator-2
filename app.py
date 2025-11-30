@@ -10,6 +10,11 @@ from dotenv import load_dotenv
 
 from story_generator import (
     GeminiClient,
+    GeminiError,
+    GeminiAPIError,
+    GeminiContentError,
+    GeminiMaxTokensError,
+    GeminiRateLimitError,
     StoryConfig,
     generate_story_in_chapters,
     generate_story_single_shot,
@@ -276,16 +281,29 @@ class StoryApp:
                 story = generate_story_in_chapters(client, config, self.temperature_var.get())
             else:
                 story = generate_story_single_shot(client, config, self.temperature_var.get())
-        except Exception as exc:  # noqa: BLE001 - want clear UI feedback
-            if (not chunked) and "MAX_TOKENS" in str(exc):
-                try:
-                    story = generate_story_in_chapters(client, config, self.temperature_var.get())
-                except Exception as chunk_exc:  # noqa: BLE001
-                    self.root.after(0, self._handle_error, chunk_exc, "Generation failed even after chunking.")
-                    return
-            else:
-                self.root.after(0, self._handle_error, exc, "Generation failed.")
+        except GeminiMaxTokensError as exc:
+            if chunked:
+                self.root.after(
+                    0,
+                    self._handle_error,
+                    exc,
+                    "Gemini hit the token limit even with chapter chunking.",
+                )
                 return
+            try:
+                story = generate_story_in_chapters(client, config, self.temperature_var.get())
+            except GeminiError as chunk_exc:
+                self.root.after(0, self._handle_error, chunk_exc, "Generation failed even after chunking.")
+                return
+        except GeminiContentError as exc:
+            self.root.after(0, self._handle_error, exc, "Gemini blocked the story for safety reasons.")
+            return
+        except GeminiRateLimitError as exc:
+            self.root.after(0, self._handle_error, exc, "Gemini rate limit hit during generation.")
+            return
+        except GeminiAPIError as exc:
+            self.root.after(0, self._handle_error, exc, "Generation failed due to API error.")
+            return
         self.root.after(0, self._handle_success, story)
 
     def _translate_story_async(self, story_text: str) -> None:
@@ -299,8 +317,17 @@ class StoryApp:
                 temperature=0.35,
                 max_chars=1800,
             )
-        except Exception as exc:  # noqa: BLE001 - want clear UI feedback
-            self.root.after(0, self._handle_error, exc, "Translation failed.")
+        except GeminiContentError as exc:
+            self.root.after(0, self._handle_error, exc, "Translation blocked by Gemini safety filters.")
+            return
+        except GeminiRateLimitError as exc:
+            self.root.after(0, self._handle_error, exc, "Gemini rate limit hit during translation.")
+            return
+        except GeminiMaxTokensError as exc:
+            self.root.after(0, self._handle_error, exc, "Translation chunk still exceeded token limit.")
+            return
+        except GeminiAPIError as exc:
+            self.root.after(0, self._handle_error, exc, "Translation failed due to API error.")
             return
         self.root.after(0, self._handle_translation_success, translation)
 
@@ -311,7 +338,7 @@ class StoryApp:
         else:
             self.translate_btn.configure(state=tk.DISABLED)
         self.status_var.set(status_message)
-        messagebox.showerror("Gemini error", str(exc))
+        messagebox.showerror("Gemini error", self._friendly_error_text(exc))
 
     def _handle_success(self, story: str) -> None:
         self.generate_btn.configure(state=tk.NORMAL)
@@ -326,6 +353,18 @@ class StoryApp:
         self.status_var.set("Marathi translation ready!")
         self.output_text.delete("1.0", tk.END)
         self.output_text.insert(tk.END, story)
+
+    @staticmethod
+    def _friendly_error_text(exc: Exception) -> str:
+        if isinstance(exc, GeminiContentError):
+            return "Gemini blocked the request because the content tripped safety filters. Try softening the prompt or removing sensitive details."
+        if isinstance(exc, GeminiRateLimitError):
+            return "Gemini rate limit reached. Wait a few seconds before trying again."
+        if isinstance(exc, GeminiMaxTokensError):
+            return "Gemini hit its token ceiling. Reduce the target length or enable chapter chunking."
+        if isinstance(exc, GeminiAPIError):
+            return str(exc)
+        return str(exc)
 
 
 def main() -> None:
