@@ -30,8 +30,6 @@ Provide a config file to skip interactive questions:
 python story_generator.py --config config/story_request.json --output outputs\festival_story.txt
 ```
 
-By default the generator now asks Gemini for each chapter separately. This keeps long stories consistent and avoids truncated outputs. If you ever need the legacy single-request behavior, append `--mode single`.
-
 Structure of the JSON file:
 
 ```json
@@ -61,6 +59,18 @@ python app.py
 
 Pick from curated dropdowns for genre, style, inspirations, word lengths, chapter counts, twists, ending tones, and Gemini models. Enter your story description plus characters, click **Generate story**, and the response will appear in the built-in viewer.
 
+Once a story is visible, click **Translate to Marathi** to fetch a faithful translation that preserves formatting and realism.
+
+### Translate an existing story (CLI)
+
+Point the CLI at any text file to translate it (defaults to Marathi, but you can override the language):
+
+```powershell
+python story_generator.py --translate-file outputs\festival_story.txt --translate-language Marathi --output outputs\festival_story_mr.txt
+```
+
+The script builds a translation-only prompt that forbids summaries or commentary and prints the translated story text (and optionally saves it via `--output`).
+
 ### Prompt inspection
 
 Use `--dry-run` to print the assembled prompt before calling Gemini:
@@ -69,11 +79,9 @@ Use `--dry-run` to print the assembled prompt before calling Gemini:
 python story_generator.py --config request.json --dry-run
 ```
 
-With sequential mode you will see the Chapter 1 template; switch to `--mode single` to inspect the one-shot prompt.
-
 ## Notes
 
 - The generated prompt enforces consistency (no character drift, steady tone, chapter structure) and explicitly demands Maharashtrian cultural grounding to minimise deviation.
+- Translation mode sends a strict instruction set so Gemini returns only the converted prose—no headers, comments, or extra narration.
 - Adjust `--temperature` or `--model` if you need a calmer or more exploratory narrative.
 - Stories are streamed back to stdout and optionally written to the file specified by `--output`.
-- Sequential mode feeds each newly written chapter back into Gemini so part 2 continues exactly where part 1 stopped; the GUI shows partial chapters as they arrive.

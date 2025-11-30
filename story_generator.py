@@ -8,7 +8,7 @@ import os
 import sys
 import textwrap
 from dataclasses import dataclass, asdict
-from typing import Callable, List, Sequence
+from typing import List
 
 import requests
 from dotenv import load_dotenv
@@ -150,88 +150,30 @@ def build_prompt(cfg: StoryConfig) -> str:
     return textwrap.dedent(template).strip()
 
 
-def build_chapter_prompt(cfg: StoryConfig, chapter_number: int, previous_chapters: Sequence[str]) -> str:
-    """Prompt for a single chapter while preserving previously generated context."""
+def build_translation_prompt(story_text: str, target_language: str = "Marathi") -> str:
+    """Create a constrained prompt that only asks for literal translation."""
 
-    character_lines = "\n".join(f"- {c}" for c in cfg.characters) or "- Introduce 1-3 fitting characters but keep them stable once named."
-    twist_lines = "\n".join(f"- {t}" for t in cfg.plot_twists) or "- Subtle reveal tied to family legacy"
-    previous_text = "\n\n".join(previous_chapters).strip()
-    if previous_text:
-        history_block = f"Previously delivered chapters (do not rewrite them, only reference as needed):\n{previous_text}"
-    else:
-        history_block = "No chapters have been written yet."
-
-    target_words = max(200, cfg.word_length // max(1, cfg.chapters))
-    is_final = chapter_number == cfg.chapters
+    sanitized = story_text.strip()
+    if not sanitized:
+        raise ValueError("No story text supplied for translation.")
 
     template = f"""
-    You are continuing an English-language Maharashtrian story. Maintain tone, pacing, and all factual details.
+    You are an expert literary translator. Translate the provided story into {target_language}
+    while preserving realism, tone, pacing, and structure. Do not summarize, omit, or embellish
+    any details. Keep chapter headings, paragraph breaks, and character names aligned with their
+    roles, translating them only when culturally appropriate for {target_language} readers.
 
-    Global story brief (apply to every chapter):
-    - Core description: {cfg.story_description}
-    - Characters to reuse consistently:
-    {character_lines}
-    - Genre: {cfg.genre}
-    - Writing style: {cfg.writing_style}
-    - Literary inspiration: {cfg.literature_inspiration}
-    - Plot twists to weave across chapters:
-    {twist_lines}
-    - Ending mood/type: {cfg.ending_type}
+    Output rules:
+    1. Return only the translated story text, no commentary, code fences, or explanations.
+    2. Mirror the original formatting exactly (chapter headings, blank lines, italics markers, etc.).
+    3. Maintain emotional intensity and descriptive richness without introducing new ideas.
 
-    Previously written material:
-    {history_block}
-
-    Task:
-    - Write Chapter {chapter_number} of {cfg.chapters}, roughly {target_words} words.
-    - Begin with the heading "Chapter {chapter_number}: <concise title>".
-    - Keep all characters' motivations, relationships, and cultural details consistent with earlier chapters.
-    - Advance the plot meaningfully; reference earlier events naturally.
-    - Avoid summarising past chapters verbatim.
-    - {'Resolve all arcs with the specified ending mood.' if is_final else 'End with a natural beat that leads into the next chapter without cliffhangers that derail tone.'}
-
-    Output only the prose for this chapter.
+    Story to translate:
+    <story>
+    {sanitized}
+    </story>
     """
     return textwrap.dedent(template).strip()
-
-
-def _generate_story_sequential(
-    cfg: StoryConfig,
-    client: "GeminiClient",
-    *,
-    temperature: float,
-    part_callback: Callable[[int, str], None] | None = None,
-) -> str:
-    previous: list[str] = []
-    outputs: list[str] = []
-    for chapter_number in range(1, cfg.chapters + 1):
-        prompt = build_chapter_prompt(cfg, chapter_number, previous)
-        part = client.generate_story(prompt, temperature).strip()
-        outputs.append(part)
-        previous.append(part)
-        if part_callback:
-            part_callback(chapter_number, part)
-    return "\n\n".join(outputs)
-
-
-def generate_story_text(
-    cfg: StoryConfig,
-    client: "GeminiClient",
-    *,
-    temperature: float,
-    mode: str = "sequential",
-    part_callback: Callable[[int, str], None] | None = None,
-) -> str:
-    """Generate a story either in one shot or chapter-by-chapter."""
-
-    if mode == "single":
-        prompt = build_prompt(cfg)
-        story = client.generate_story(prompt, temperature).strip()
-        if part_callback:
-            part_callback(1, story)
-        return story
-    if mode != "sequential":
-        raise ValueError("mode must be 'single' or 'sequential'")
-    return _generate_story_sequential(cfg, client, temperature=temperature, part_callback=part_callback)
 
 
 class GeminiClient:
@@ -244,7 +186,7 @@ class GeminiClient:
         self.model = model
         self.endpoint = f"https://generativelanguage.googleapis.com/v1/models/{model}:generateContent"
 
-    def generate_story(self, prompt: str, temperature: float) -> str:
+    def _call_gemini(self, prompt: str, temperature: float) -> str:
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {
@@ -267,6 +209,18 @@ class GeminiClient:
         except (KeyError, IndexError, TypeError) as exc:
             raise RuntimeError(f"Unexpected Gemini response: {json.dumps(data, indent=2)}") from exc
 
+    def generate_story(self, prompt: str, temperature: float) -> str:
+        return self._call_gemini(prompt, temperature)
+
+    def translate_text(
+        self,
+        source_text: str,
+        target_language: str = "Marathi",
+        temperature: float = 0.35,
+    ) -> str:
+        translation_prompt = build_translation_prompt(source_text, target_language)
+        return self._call_gemini(translation_prompt, temperature)
+
 
 def load_config(path: str | None) -> StoryConfig:
     if not path:
@@ -286,10 +240,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", help="File path to save the generated story")
     parser.add_argument("--dry-run", action="store_true", help="Print the prompt without calling Gemini")
     parser.add_argument(
-        "--mode",
-        choices=["sequential", "single"],
-        default="sequential",
-        help="Use chapter-by-chapter requests (default) or a single long request",
+        "--translate-file",
+        help="Translate the contents of a text file to Marathi instead of generating a new story",
+    )
+    parser.add_argument(
+        "--translate-language",
+        default="Marathi",
+        help="Target language when using --translate-file (default: Marathi)",
     )
     return parser.parse_args()
 
@@ -297,28 +254,55 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     load_dotenv()
     args = parse_args()
+    api_key = os.getenv("GEMINI_API_KEY")
+    try:
+        client = GeminiClient(api_key=api_key, model=args.model)
+    except ValueError as err:
+        print(err, file=sys.stderr)
+        sys.exit(1)
+
+    if args.translate_file:
+        try:
+            with open(args.translate_file, "r", encoding="utf-8") as handle:
+                source_text = handle.read()
+        except OSError as err:
+            print(f"Error loading translation source: {err}", file=sys.stderr)
+            sys.exit(1)
+
+        if not source_text.strip():
+            print("Translation source file is empty.", file=sys.stderr)
+            sys.exit(1)
+
+        try:
+            translation = client.translate_text(
+                source_text,
+                target_language=args.translate_language,
+                temperature=args.temperature,
+            )
+        except Exception as err:  # noqa: BLE001 - surface full context to user
+            print(f"Failed to translate story: {err}", file=sys.stderr)
+            sys.exit(1)
+
+        if args.output:
+            with open(args.output, "w", encoding="utf-8") as handle:
+                handle.write(translation)
+        print(translation)
+        return
+
     try:
         cfg = load_config(args.config)
     except (OSError, ValueError) as err:
         print(f"Error loading config: {err}", file=sys.stderr)
         sys.exit(1)
 
+    prompt = build_prompt(cfg)
+
     if args.dry_run:
-        if args.mode == "single":
-            print(build_prompt(cfg))
-        else:
-            print(build_chapter_prompt(cfg, 1, []))
+        print(prompt)
         return
 
-    api_key = os.getenv("GEMINI_API_KEY")
     try:
-        client = GeminiClient(api_key=api_key, model=args.model)
-        story = generate_story_text(
-            cfg,
-            client,
-            temperature=args.temperature,
-            mode=args.mode,
-        )
+        story = client.generate_story(prompt, args.temperature)
     except Exception as err:  # noqa: BLE001 - surface full context to user
         print(f"Failed to generate story: {err}", file=sys.stderr)
         sys.exit(1)

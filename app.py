@@ -8,7 +8,7 @@ from tkinter import messagebox, ttk
 
 from dotenv import load_dotenv
 
-from story_generator import GeminiClient, StoryConfig, generate_story_text
+from story_generator import GeminiClient, StoryConfig, build_prompt
 
 load_dotenv()
 
@@ -40,11 +40,10 @@ INSPIRATION_OPTIONS = [
 ]
 
 LENGTH_OPTIONS = [
-    ("Compact vignette (~900 words)", 900),
-    ("Standard short story (~1000 words)", 1000),
-    ("Roomy narrative (~1500 words)", 1500),
-    ("Epic chaptered tale (~2000 words)", 2000),
-    ("Advanced Epic chaptered tale (~3000 words)", 3000)
+    ("Compact vignette (~600 words)", 600),
+    ("Standard short story (~900 words)", 900),
+    ("Roomy narrative (~1200 words)", 1200),
+    ("Epic chaptered tale (~1500 words)", 1500),
 ]
 
 CHAPTER_OPTIONS = [1, 2, 3, 4, 5]
@@ -54,13 +53,8 @@ PLOT_TWIST_OPTIONS = [
     "love",
     "injury",
     "change of heart",
-    "relevation",
-    "A rumour",
-    "Crime",
-    "Quarrel",
-    "Unwanted Truth",
-    "misunderstanding",
-    "Funny Misunderstanding"
+    "Hidden talent changes the stakes",
+    "A rumour masks a deeper truth",
 ]
 
 ENDING_OPTIONS = [
@@ -97,7 +91,6 @@ class StoryApp:
         self.root.minsize(800, 650)
 
         self.status_var = tk.StringVar(value="Waiting for input…")
-        self.expected_chapters = 0
         self.genre_var = tk.StringVar(value=GENRE_OPTIONS[0])
         self.style_var = tk.StringVar(value=STYLE_OPTIONS[0])
         self.inspiration_var = tk.StringVar(value=INSPIRATION_OPTIONS[0])
@@ -184,6 +177,13 @@ class StoryApp:
         button_frame.pack(fill=tk.X, pady=(12, 0))
         self.generate_btn = ttk.Button(button_frame, text="Generate story", command=self.on_generate)
         self.generate_btn.pack(side=tk.LEFT)
+        self.translate_btn = ttk.Button(
+            button_frame,
+            text="Translate to Marathi",
+            command=self.on_translate,
+            state=tk.DISABLED,
+        )
+        self.translate_btn.pack(side=tk.LEFT, padx=(8, 0))
         ttk.Label(button_frame, textvariable=self.status_var).pack(side=tk.RIGHT)
 
         ttk.Label(root_frame, text="Story output").pack(anchor=tk.W, pady=(16, 4))
@@ -211,11 +211,20 @@ class StoryApp:
             messagebox.showerror("Invalid input", str(exc))
             return
 
-        self.expected_chapters = config.chapters
-        self.output_text.delete("1.0", tk.END)
         self.generate_btn.configure(state=tk.DISABLED)
         self.status_var.set("Sending prompt to Gemini…")
         threading.Thread(target=self._generate_story_async, args=(config,), daemon=True).start()
+
+    def on_translate(self) -> None:
+        story_text = self.output_text.get("1.0", tk.END).strip()
+        if not story_text:
+            messagebox.showinfo("No story", "Generate a story before translating it to Marathi.")
+            return
+
+        self.generate_btn.configure(state=tk.DISABLED)
+        self.translate_btn.configure(state=tk.DISABLED)
+        self.status_var.set("Translating story to Marathi…")
+        threading.Thread(target=self._translate_story_async, args=(story_text,), daemon=True).start()
 
     def _gather_config(self) -> StoryConfig:
         description = self.description_text.get("1.0", tk.END).strip()
@@ -246,40 +255,47 @@ class StoryApp:
 
     def _generate_story_async(self, config: StoryConfig) -> None:
         try:
+            prompt = build_prompt(config)
             api_key = os.getenv("GEMINI_API_KEY")
             client = GeminiClient(api_key=api_key, model=self.model_var.get())
-            def part_callback(idx: int, text: str) -> None:
-                self.root.after(0, self._append_partial, idx, text)
-            story = generate_story_text(
-                config,
-                client,
-                temperature=self.temperature_var.get(),
-                mode="sequential",
-                part_callback=part_callback,
-            )
+            story = client.generate_story(prompt=prompt, temperature=self.temperature_var.get())
         except Exception as exc:  # noqa: BLE001 - want clear UI feedback
-            self.root.after(0, self._handle_error, exc)
+            self.root.after(0, self._handle_error, exc, "Generation failed.")
             return
         self.root.after(0, self._handle_success, story)
 
-    def _handle_error(self, exc: Exception) -> None:
+    def _translate_story_async(self, story_text: str) -> None:
+        try:
+            api_key = os.getenv("GEMINI_API_KEY")
+            client = GeminiClient(api_key=api_key, model=self.model_var.get())
+            translation = client.translate_text(story_text, target_language="Marathi", temperature=0.35)
+        except Exception as exc:  # noqa: BLE001 - want clear UI feedback
+            self.root.after(0, self._handle_error, exc, "Translation failed.")
+            return
+        self.root.after(0, self._handle_translation_success, translation)
+
+    def _handle_error(self, exc: Exception, status_message: str) -> None:
         self.generate_btn.configure(state=tk.NORMAL)
-        self.status_var.set("Generation failed.")
+        if self.output_text.get("1.0", tk.END).strip():
+            self.translate_btn.configure(state=tk.NORMAL)
+        else:
+            self.translate_btn.configure(state=tk.DISABLED)
+        self.status_var.set(status_message)
         messagebox.showerror("Gemini error", str(exc))
 
     def _handle_success(self, story: str) -> None:
         self.generate_btn.configure(state=tk.NORMAL)
+        self.translate_btn.configure(state=tk.NORMAL)
         self.status_var.set("Story ready!")
         self.output_text.delete("1.0", tk.END)
         self.output_text.insert(tk.END, story)
 
-    def _append_partial(self, chapter_number: int, text: str) -> None:
-        prefix = f"Chapter {chapter_number}/{self.expected_chapters} ready"
-        self.status_var.set(prefix)
-        current = self.output_text.get("1.0", tk.END).strip()
-        if current:
-            self.output_text.insert(tk.END, "\n\n")
-        self.output_text.insert(tk.END, text.strip())
+    def _handle_translation_success(self, story: str) -> None:
+        self.generate_btn.configure(state=tk.NORMAL)
+        self.translate_btn.configure(state=tk.NORMAL)
+        self.status_var.set("Marathi translation ready!")
+        self.output_text.delete("1.0", tk.END)
+        self.output_text.insert(tk.END, story)
 
 
 def main() -> None:
