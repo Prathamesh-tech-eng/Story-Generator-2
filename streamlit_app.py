@@ -5,7 +5,9 @@ import os
 from typing import List
 
 import streamlit as st
+import streamlit.components.v1 as components
 from dotenv import load_dotenv
+import json
 
 from story_generator import (
     GeminiAPIError,
@@ -90,6 +92,42 @@ GEMINI_MODELS = [
 ]
 
 TRANSLATION_LANGUAGES = ["Marathi", "Hindi", "Sanskrit", "English"]
+
+
+def _copy_button(label: str, text: str, key: str) -> None:
+    """Render a copy-to-clipboard button using a small HTML snippet."""
+    if not text:
+        return
+    encoded = json.dumps(text)
+    # Height keeps Streamlit layout from collapsing when components render.
+    components.html(
+        f"""
+        <button id='{key}' style='margin-left:8px;'> {label} </button>
+        <script>
+        (function() {{
+            const button = document.getElementById('{key}');
+            if (!button) return;
+            button.addEventListener('click', async () => {{
+                button.disabled = true;
+                try {{
+                    const text = {encoded};
+                    await navigator.clipboard.writeText(text);
+                    const original = button.innerText;
+                    button.innerText = 'Copied!';
+                    setTimeout(() => {{
+                        button.innerText = original;
+                        button.disabled = false;
+                    }}, 1800);
+                }} catch (err) {{
+                    button.innerText = 'Copy failed';
+                    setTimeout(() => {{ button.innerText = '{label}'; button.disabled = false; }}, 1800);
+                }}
+            }});
+        }})();
+        </script>
+        """,
+        height=60,
+    )
 
 
 def _get_characters(raw_value: str) -> List[str]:
@@ -241,12 +279,16 @@ def main() -> None:
                     else:
                         st.success("Story ready!")
                         st.text_area("Generated story", value=story, height=400, key="story_output")
-                        st.download_button(
-                            label="Download story",
-                            data=story,
-                            file_name="maharashtrian_story.txt",
-                            mime="text/plain",
-                        )
+                        button_cols = st.columns([1, 1, 5])
+                        with button_cols[0]:
+                            st.download_button(
+                                label="Download story",
+                                data=story,
+                                file_name="maharashtrian_story.txt",
+                                mime="text/plain",
+                            )
+                        with button_cols[1]:
+                            _copy_button("Copy story", story, key="copy_story_button")
                         _set_latest_story(story)
 
     with translate_tab:
@@ -286,12 +328,16 @@ def main() -> None:
                 else:
                     st.success(f"Translation ready in {target_language}!")
                     st.text_area("Translated story", value=translation, height=360, key="translation_output")
-                    st.download_button(
-                        label="Download translation",
-                        data=translation,
-                        file_name=f"story_{target_language.lower()}.txt",
-                        mime="text/plain",
-                    )
+                    button_cols = st.columns([1, 1, 5])
+                    with button_cols[0]:
+                        st.download_button(
+                            label="Download translation",
+                            data=translation,
+                            file_name=f"story_{target_language.lower()}.txt",
+                            mime="text/plain",
+                        )
+                    with button_cols[1]:
+                        _copy_button("Copy translation", translation, key="copy_translation_button")
 
 
 if __name__ == "__main__":

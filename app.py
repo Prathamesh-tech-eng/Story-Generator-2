@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 import threading
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 
 from dotenv import load_dotenv
 
@@ -204,7 +204,15 @@ class StoryApp:
         self.translate_btn.pack(side=tk.LEFT, padx=(8, 0))
         ttk.Label(button_frame, textvariable=self.status_var).pack(side=tk.RIGHT)
 
-        ttk.Label(root_frame, text="Story output").pack(anchor=tk.W, pady=(16, 4))
+        output_header = ttk.Frame(root_frame)
+        output_header.pack(fill=tk.X, pady=(16, 4))
+        ttk.Label(output_header, text="Story output").pack(side=tk.LEFT)
+        output_controls = ttk.Frame(output_header)
+        output_controls.pack(side=tk.RIGHT)
+        self.copy_btn = ttk.Button(output_controls, text="Copy", command=self.on_copy_story, state=tk.DISABLED)
+        self.copy_btn.pack(side=tk.LEFT, padx=(0, 8))
+        self.save_btn = ttk.Button(output_controls, text="Save as .txt", command=self.on_save_story, state=tk.DISABLED)
+        self.save_btn.pack(side=tk.LEFT)
         output_frame = ttk.Frame(root_frame)
         output_frame.pack(fill=tk.BOTH, expand=True)
         self.output_text, output_scroll = _build_scrollable_text(output_frame, height=16)
@@ -337,6 +345,7 @@ class StoryApp:
             self.translate_btn.configure(state=tk.NORMAL)
         else:
             self.translate_btn.configure(state=tk.DISABLED)
+        self._update_copy_save_buttons()
         self.status_var.set(status_message)
         messagebox.showerror("Gemini error", self._friendly_error_text(exc))
 
@@ -346,6 +355,7 @@ class StoryApp:
         self.status_var.set("Story ready!")
         self.output_text.delete("1.0", tk.END)
         self.output_text.insert(tk.END, story)
+        self._update_copy_save_buttons()
 
     def _handle_translation_success(self, story: str) -> None:
         self.generate_btn.configure(state=tk.NORMAL)
@@ -353,6 +363,38 @@ class StoryApp:
         self.status_var.set("Marathi translation ready!")
         self.output_text.delete("1.0", tk.END)
         self.output_text.insert(tk.END, story)
+        self._update_copy_save_buttons()
+
+    def on_copy_story(self) -> None:
+        story_text = self.output_text.get("1.0", tk.END).strip()
+        if not story_text:
+            messagebox.showinfo("No story", "Generate or translate a story before copying.")
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(story_text)
+        self.root.update()  # ensures clipboard keeps data after app closes
+        self.status_var.set("Story copied to clipboard.")
+
+    def on_save_story(self) -> None:
+        story_text = self.output_text.get("1.0", tk.END).strip()
+        if not story_text:
+            messagebox.showinfo("No story", "Generate or translate a story before saving.")
+            return
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".txt",
+            filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
+            initialfile="maharashtrian_story.txt",
+            title="Save story as",
+        )
+        if not file_path:
+            return
+        try:
+            with open(file_path, "w", encoding="utf-8") as fh:
+                fh.write(story_text)
+        except OSError as exc:
+            messagebox.showerror("Save failed", f"Could not save the story: {exc}")
+            return
+        self.status_var.set(f"Story saved to {file_path}.")
 
     @staticmethod
     def _friendly_error_text(exc: Exception) -> str:
@@ -365,6 +407,12 @@ class StoryApp:
         if isinstance(exc, GeminiAPIError):
             return str(exc)
         return str(exc)
+
+    def _update_copy_save_buttons(self) -> None:
+        has_story = bool(self.output_text.get("1.0", tk.END).strip())
+        new_state = tk.NORMAL if has_story else tk.DISABLED
+        self.copy_btn.configure(state=new_state)
+        self.save_btn.configure(state=new_state)
 
 
 def main() -> None:
