@@ -61,6 +61,16 @@ Pick from curated dropdowns for genre, style, inspirations, word lengths, chapte
 
 Once a story is visible, click **Translate to Marathi** to fetch a faithful translation that preserves formatting and realism.
 
+### Streamlit web app
+
+Launch a browser-based experience suitable for local demos or hosting on Streamlit Cloud:
+
+```powershell
+streamlit run streamlit_app.py
+```
+
+The "Generate Story" tab mirrors the CLI inputs with dropdowns, multi-select twists, and Gemini model/temperature controls. The "Translate Story" tab lets you paste any prose (or re-use the latest generated output) and obtain an on-brand Marathi/Hindi/Sanskrit/English rendition that preserves realism. Add your `GEMINI_API_KEY` to the environment before deploying to Streamlit Cloud or any hosting provider.
+
 ### Translate an existing story (CLI)
 
 Point the CLI at any text file to translate it (defaults to Marathi, but you can override the language):
